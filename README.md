@@ -28,6 +28,28 @@ pip install pytest
 pytest tests
 ```
 
+### SIFT1M Flat-L2 benchmark
+
+Run an end-to-end localhost benchmark against the standard SIFT1M ground truth:
+
+```bash
+python scripts/benchmark_sift1m.py \
+    --dataset-dir /path/to/SIFT1M \
+    --num-servers 2 \
+    --k 10 \
+    --output results/sift1m_flat_l2_2servers.json
+```
+
+The dataset directory must contain `base.fvecs`, `query.fvecs`, and
+`groundtruth.ivecs`. For a quick correctness check, use `--max-base` and
+`--max-queries`; the script computes a new exact reference when the base is
+truncated. The script reports shard sizes, Recall@1, Recall@k, build time,
+search time, and QPS as JSON.
+
+The servers launched by this script run on localhost and use CPU Faiss. Use
+this mode for correctness and local diagnostics, not as a multi-node scaling
+result.
+
 ### Code formatting
 `black --line-length 100 .`
 
