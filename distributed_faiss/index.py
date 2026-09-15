@@ -91,7 +91,7 @@ def init_flat_index(cfg: IndexCfg):
 
 
 faiss_special_index_factories = {
-    "flat": lambda cfg: faiss.IndexFlatIP(cfg.dim),
+    "flat": init_flat_index,
     "ivf_simple": init_faiss_ivf_simple,
     "knnlm": init_faiss_knnlm,
     "hnswsq": init_faiss_hnswsq,

@@ -15,6 +15,9 @@ import tempfile
 from pathlib import Path
 from typing import List
 
+import faiss
+
+from distributed_faiss.index import Index
 from distributed_faiss.index_cfg import IndexCfg
 from distributed_faiss.server import IndexServer
 from distributed_faiss.client import IndexClient
@@ -437,6 +440,38 @@ class TestIntegration(unittest.TestCase):
 class TestIndexCfg(unittest.TestCase):
     def test_from_index_cfg_from_json(self):
         IndexCfg.from_json(REPO_HOME.joinpath("tests/test_index_config.json"))
+
+
+class TestFlatIndexMetric(unittest.TestCase):
+    def test_flat_index_honors_l2_metric(self):
+        cfg = IndexCfg(index_builder_type="flat", dim=2, metric="l2")
+        index = Index(cfg)._init_faiss_index(total_data_size=3)
+
+        self.assertEqual(index.metric_type, faiss.METRIC_L2)
+
+        database = np.array(
+            [
+                [1.0, 0.0],
+                [10.0, 0.0],
+                [0.0, 2.0],
+            ],
+            dtype=np.float32,
+        )
+        query = np.array([[1.1, 0.0]], dtype=np.float32)
+
+        index.add(database)
+        distances, neighbors = index.search(query, 3)
+
+        np.testing.assert_array_equal(
+            neighbors,
+            np.array([[0, 2, 1]], dtype=np.int64),
+        )
+        np.testing.assert_allclose(
+            distances,
+            np.array([[0.01, 5.21, 79.21]], dtype=np.float32),
+            rtol=1e-5,
+            atol=1e-5,
+        )
 
 
 if __name__ == "__main__":
