@@ -4,6 +4,8 @@ import numpy as np
 import pytest
 
 from scripts.benchmark_sift1m import mmap_vecs, recall_at_k, validate_args
+from scripts.run_sift1m_local_matrix import summarize
+from distributed_faiss.server import IndexServer
 
 
 def write_vecs(path, values, dtype):
@@ -56,7 +58,38 @@ def test_validate_args_rejects_k_larger_than_selected_base():
         query_batch_size=10,
         max_base=10,
         max_queries=None,
+        omp_threads=None,
     )
 
     with pytest.raises(ValueError, match="exceeds the selected base size"):
         validate_args(args, base_count=100, query_count=10, groundtruth_width=100)
+
+
+def test_matrix_summary_uses_median():
+    runs = [
+        {
+            "num_servers": 2,
+            "omp_threads_per_server": 4,
+            "recall_at_1": 1.0,
+            "recall_at_k": 1.0,
+            "search_seconds": search_seconds,
+            "qps": 100 / search_seconds,
+            "build_seconds": search_seconds / 10,
+            "peak_process_rss_mb": 500.0,
+            "passed": True,
+        }
+        for search_seconds in (10.0, 20.0, 30.0)
+    ]
+
+    summary = summarize(runs)[0]
+    assert summary["median_search_seconds"] == 20.0
+    assert summary["median_qps"] == 5.0
+    assert summary["total_omp_threads"] == 8
+
+
+def test_server_accepts_valid_omp_thread_count(tmp_path):
+    server = IndexServer(0, index_storage_dir=str(tmp_path))
+    server.set_omp_num_threads(4)
+    assert server.omp_num_threads == 4
+    with pytest.raises(ValueError, match="must be positive"):
+        server.set_omp_num_threads(0)

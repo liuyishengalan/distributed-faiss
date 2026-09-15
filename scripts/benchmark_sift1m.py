@@ -6,6 +6,9 @@ import argparse
 import json
 import logging
 import math
+import os
+import platform
+import resource
 import socket
 import tempfile
 import threading
@@ -21,6 +24,16 @@ from distributed_faiss.index_state import IndexState
 from distributed_faiss.server import IndexServer
 
 DEFAULT_DATASET_DIR = Path("/home/yslalan/project/dataset/SIFT1M")
+
+
+def cpu_model_name():
+    try:
+        for line in Path("/proc/cpuinfo").read_text().splitlines():
+            if line.startswith("model name"):
+                return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return platform.machine()
 
 
 def parse_args():
@@ -127,6 +140,8 @@ def validate_args(args, base_count, query_count, groundtruth_width):
         raise ValueError("--k must be positive")
     if args.add_batch_size < 1 or args.query_batch_size < 1:
         raise ValueError("Batch sizes must be positive")
+    if args.omp_threads is not None and args.omp_threads < 1:
+        raise ValueError("--omp-threads must be positive")
     if args.max_base is not None and not 1 <= args.max_base <= base_count:
         raise ValueError(f"--max-base must be between 1 and {base_count}")
     if args.max_queries is not None and not 1 <= args.max_queries <= query_count:
@@ -272,6 +287,10 @@ def main():
                 "add_batch_size": args.add_batch_size,
                 "query_batch_size": args.query_batch_size,
                 "omp_threads_per_server": args.omp_threads,
+                "cpu_affinity_count": len(os.sched_getaffinity(0)),
+                "cpu_model": platform.processor() or cpu_model_name(),
+                "faiss_version": faiss.__version__,
+                "python_version": platform.python_version(),
                 "shard_sizes": shard_sizes,
                 "indexed_vectors": indexed_vectors,
                 "recall_at_1": recall_at_1,
@@ -281,6 +300,7 @@ def main():
                 "build_seconds": build_seconds,
                 "search_seconds": search_seconds,
                 "qps": query_count / search_seconds,
+                "peak_process_rss_mb": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024,
                 "passed": passed,
             }
             rendered = json.dumps(result, indent=2)

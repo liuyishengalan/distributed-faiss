@@ -19,6 +19,7 @@ import types
 from typing import List, Tuple, Optional
 
 import numpy as np
+import faiss
 
 from distributed_faiss.index import Index
 from distributed_faiss.index_cfg import IndexCfg
@@ -42,6 +43,7 @@ class IndexServer:
         self.rank = rank
         self.socket = None
         self.ready = threading.Event()
+        self.omp_num_threads = None
         logger.info(f"IndexServer saving to {index_storage_dir} , rank={rank}")
         self.index_storage_dir = index_storage_dir
 
@@ -191,7 +193,7 @@ class IndexServer:
             read_bytes = socket.last_read_len
             # logger.info('read_bytes %s', read_bytes)
             if read_bytes > 0:
-                (fname, args) = client_request
+                fname, args = client_request
                 logger.info("fname %s", fname)
         except EOFError:
             return 0
@@ -226,7 +228,7 @@ class IndexServer:
 
     def one_function_blocking(self, socket, fs: FileSock):
         try:
-            (fname, args) = pickle.load(fs)
+            fname, args = pickle.load(fs)
         except EOFError:
             raise ClientExit("read args")
         logger.info("executing method %s", fname)
@@ -337,11 +339,19 @@ class IndexServer:
     def search(
         self, index_id: str, query_batch: np.array, top_k: int, return_embeddings: bool
     ) -> Tuple:
+        if self.omp_num_threads is not None:
+            # OpenMP settings are thread-local: search runs in the RPC connection thread.
+            faiss.omp_set_num_threads(self.omp_num_threads)
         logger.info(f"Query idx={index_id}, query={query_batch.shape}")
         index = self._get_index(index_id)
         assert not isinstance(index, set)
         r = index.search(query_batch, top_k=top_k, return_embeddings=return_embeddings)
         return r
+
+    def set_omp_num_threads(self, num_threads: int) -> None:
+        if num_threads < 1:
+            raise ValueError("num_threads must be positive")
+        self.omp_num_threads = num_threads
 
     def get_centroids(self, index_id: str):
         index = self._get_index(index_id)

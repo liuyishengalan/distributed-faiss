@@ -50,6 +50,24 @@ The servers launched by this script run on localhost and use CPU Faiss. Use
 this mode for correctness and local diagnostics, not as a multi-node scaling
 result.
 
+For a repeated local comparison with a fixed total OpenMP search-thread budget:
+
+```bash
+python scripts/run_sift1m_local_matrix.py \
+    --dataset-dir /path/to/SIFT1M \
+    --servers 1 2 4 \
+    --repeats 3 \
+    --total-omp-threads 8 \
+    --output-dir results/sift1m_local_matrix
+```
+
+Each run writes its own JSON file. `summary.json` contains per-configuration
+medians. This launcher runs configurations sequentially; `8` total OpenMP
+threads means `8`, `4`, and `2` threads per shard for the `1`, `2`, and `4`
+server cases, respectively. The reported RSS is the peak of the localhost
+process, which contains all server threads and the client. These results are
+for independent SIFT1M query search, not all-kNN graph construction.
+
 ### Code formatting
 `black --line-length 100 .`
 
