@@ -491,8 +491,11 @@ class Index:
         if hasattr(self.faiss_index, "hnsw"):
             self.faiss_index.hnsw.efSearch = cfg.nprobe
             logger.info("hnsw.efSearch=%s", self.faiss_index.hnsw.efSearch)
-        else:
+        elif hasattr(self.faiss_index, "nprobe"):
             self.faiss_index.nprobe = cfg.nprobe
+            logger.info("nprobe=%s", self.faiss_index.nprobe)
+        else:
+            logger.warning("Faiss Index doesn't have nprobe or hnsw attributes")
 
     @staticmethod
     def infer_n_centroids(total_data_size):

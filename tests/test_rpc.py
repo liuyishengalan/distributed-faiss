@@ -7,6 +7,7 @@
 import unittest
 import _thread
 from multiprocessing import Pool as ProcessPool
+from multiprocessing import Barrier
 
 import time
 import torch
@@ -15,6 +16,13 @@ from distributed_faiss.index_cfg import IndexCfg
 from distributed_faiss.index_state import IndexState
 from distributed_faiss.rpc import Client
 from distributed_faiss.server import IndexServer
+
+_phase_barrier = None
+
+
+def init_worker(barrier):
+    global _phase_barrier
+    _phase_barrier = barrier
 
 
 def add_train_data(c: Client, index_id):
@@ -35,16 +43,24 @@ def run_client(id):
     for i in range(10):
         add_train_data(c, idx_id)
 
-    c.async_train(idx_id)
+    # No client may train or search until every client has finished ingesting.
+    _phase_barrier.wait()
 
-    c.add_buffer_to_index(idx_id)
+    if id == 0:
+        c.async_train(idx_id)
+        c.add_buffer_to_index(idx_id)
+
+    _phase_barrier.wait()
 
     while True:
         state = c.get_state(idx_id)
         print("Server state {}".format(state))
         if state == IndexState.TRAINED:
             break
-        time.sleep(2)
+        time.sleep(0.1)
+
+    # Keep later clients from adding or training while earlier clients search.
+    _phase_barrier.wait()
 
     for i in range(10):
         _result = c.search(idx_id, torch.rand(5, 512).numpy(), 5, True)
@@ -57,11 +73,20 @@ class TestRPC(unittest.TestCase):
     def test_single_server_multiple_clients_threaded(self):
         server = IndexServer(0, index_storage_dir=self.save_dir)
         _thread.start_new_thread(server.start_blocking, ())
-        time.sleep(2)  # let it start accepting clients
-        processes = ProcessPool(processes=10)
-        ids = list(range(10))
-        processes.map(run_client, ids)
-        server.stop()
+        if not server.ready.wait(timeout=5):
+            self.fail("RPC test server did not become ready")
+
+        num_clients = 10
+        barrier = Barrier(num_clients)
+        try:
+            with ProcessPool(
+                processes=num_clients,
+                initializer=init_worker,
+                initargs=(barrier,),
+            ) as processes:
+                processes.map(run_client, range(num_clients))
+        finally:
+            server.stop()
 
     @unittest.skip("Fails with ValueError: I/O operation on closed file.")
     def test_single_server_multiple_clients(self):

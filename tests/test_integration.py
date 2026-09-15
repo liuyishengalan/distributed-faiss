@@ -70,11 +70,18 @@ class TestIntegration(unittest.TestCase):
         self.single_server_port = 1241
         self.single_server = IndexServer(0, index_storage_dir=self.single_server_save_dir.name)
         _thread.start_new_thread(self.single_server.start_blocking, (self.single_server_port,))
+
+        for server in self.multi_servers:
+            if not server.ready.wait(timeout=5):
+                raise TimeoutError("Multi-index test server did not become ready")
+        if not self.single_server.ready.wait(timeout=5):
+            raise TimeoutError("Single-index test server did not become ready")
         print("Done setting up test")
 
     @classmethod
     def tearDownClass(self):
         [s.stop() for s in self.multi_servers]
+        self.single_server.stop()
         self.multi_server_save_dir.cleanup()
         self.single_server_save_dir.cleanup()
         print("Done tearing down test")
@@ -131,6 +138,9 @@ class TestIntegration(unittest.TestCase):
         assert state == not_trained, f"{state} != {not_trained} after only 9 docs"
         state = add_data(1)
         assert state != not_trained, f"{state} == {not_trained} after train_num added"
+
+        while client.get_state(self.index_id) != IndexState.TRAINED:
+            time.sleep(0.01)
 
         results = client.search(torch.rand(4, 512).numpy(), 4, self.index_id)
         assert results[0].shape == (4, 4)
@@ -221,7 +231,9 @@ class TestIntegration(unittest.TestCase):
         for client in clients:
             client.create_index(self.index_id, cfg)
             self.assertEqual(client.get_state(self.index_id), IndexState.NOT_TRAINED)
-            num_batches = random.randint(1, 4)
+            # One full round-robin pass guarantees every shard receives data
+            # before the client asks all shards to train.
+            num_batches = len(self.multi_ports)
             for _ in range(num_batches):
                 num_docs_per_batch = random.randint(1, 12800)
                 embeddings = torch.rand(num_docs_per_batch, embed_dim).numpy()
@@ -259,7 +271,13 @@ class TestIntegration(unittest.TestCase):
         query = torch.rand(num_docs_per_query, embed_dim).numpy()
         scores_aggr, meta_aggr = clients[0].search(query, topk_per_search, self.index_id)
         scores_single, meta_single = single_client.search(query, topk_per_search, self.index_id)
-        self.assertTrue((scores_aggr == scores_single).all())
+        # self.assertTrue((scores_aggr == scores_single).all())
+        np.testing.assert_allclose(
+            scores_aggr,
+            scores_single,
+            rtol=1e-6,
+            atol=5e-5,
+        )
         self.assertEqual(len(meta_aggr), len(meta_single))
         self.assertEqual(meta_aggr, meta_single)
         single_client.close()

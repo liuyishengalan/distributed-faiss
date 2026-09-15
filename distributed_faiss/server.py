@@ -41,6 +41,7 @@ class IndexServer:
         self.indexes_lock = threading.Lock()
         self.rank = rank
         self.socket = None
+        self.ready = threading.Event()
         logger.info(f"IndexServer saving to {index_storage_dir} , rank={rank}")
         self.index_storage_dir = index_storage_dir
 
@@ -102,17 +103,28 @@ class IndexServer:
         logger.info("bind %s:%d", HOST, port)
         s.bind((HOST, port))
         s.listen(10)
+        s.settimeout(0.2)
+        self.socket = s
+        self.ready.set()
 
-        while True:
-            try:
-                conn, addr = s.accept()
-            except socket.error as e:
-                if e[1] == "Interrupted system call":
+        try:
+            while self.socket is s:
+                try:
+                    conn, addr = s.accept()
+                except socket.timeout:
                     continue
-                raise
+                except OSError:
+                    if self.socket is None or s.fileno() == -1:
+                        break
+                    raise
 
-            logger.info("Connected by %s", addr)
-            tid = _thread.start_new_thread(self.exec_loop_blocking, (conn,))
+                logger.info("Connected by %s", addr)
+                _thread.start_new_thread(self.exec_loop_blocking, (conn,))
+        finally:
+            self.ready.clear()
+            if self.socket is s:
+                self.socket = None
+            s.close()
 
     def exec_loop_blocking(self, socket):
         """main execution loop. Loops and handles exit states"""
@@ -273,10 +285,15 @@ class IndexServer:
 
     def stop(self):
         logger.info("Stopping server ...")
-        if self.socket:
-            self.socket.shutdown(socket.SHUT_RDWR)
-            self.socket.close()
-            self.socket = None
+        sock = self.socket
+        self.socket = None
+        self.ready.clear()
+        if sock:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            sock.close()
 
         for index_id in self.indexes:
             self.indexes[index_id].save()
