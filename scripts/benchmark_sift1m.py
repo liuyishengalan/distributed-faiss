@@ -3,6 +3,7 @@
 """Benchmark a localhost distributed-faiss Flat-L2 index on SIFT1M."""
 
 import argparse
+from contextlib import nullcontext
 import json
 import logging
 import math
@@ -13,6 +14,7 @@ import socket
 import tempfile
 import threading
 import time
+import uuid
 from pathlib import Path
 
 import faiss
@@ -39,7 +41,14 @@ def cpu_model_name():
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset-dir", type=Path, default=DEFAULT_DATASET_DIR)
-    parser.add_argument("--num-servers", type=int, default=2)
+    parser.add_argument("--num-servers", type=int, default=None)
+    parser.add_argument(
+        "--discovery-config",
+        type=Path,
+        default=None,
+        help="Connect to already running servers instead of launching localhost threads.",
+    )
+    parser.add_argument("--index-id", default=None)
     parser.add_argument("--k", type=int, default=10)
     parser.add_argument("--add-batch-size", type=int, default=10_000)
     parser.add_argument("--query-batch-size", type=int, default=100)
@@ -104,6 +113,50 @@ def reserve_free_ports(count):
     return ports
 
 
+def read_discovery(path):
+    path = Path(path)
+    lines = path.read_text().splitlines()
+    if not lines:
+        raise ValueError(f"Empty discovery file: {path}")
+    count = int(lines[0])
+    endpoints = []
+    for line in lines[1:]:
+        host, separator, port = line.partition(",")
+        if not separator or not host or not port:
+            raise ValueError(f"Invalid discovery entry {line!r} in {path}")
+        endpoints.append((host, int(port)))
+    if count < 1 or len(endpoints) != count:
+        raise ValueError(f"Discovery file declares {count} servers but lists {len(endpoints)}")
+    return endpoints
+
+
+def wait_for_discovery(path, timeout_seconds):
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        try:
+            return read_discovery(path)
+        except FileNotFoundError:
+            if time.monotonic() >= deadline:
+                raise
+        except ValueError as exc:
+            if "declares" not in str(exc) or time.monotonic() >= deadline:
+                raise
+        time.sleep(0.1)
+
+
+def wait_for_external_servers(endpoints, timeout_seconds):
+    deadline = time.monotonic() + timeout_seconds
+    for host, port in endpoints:
+        while True:
+            try:
+                with socket.create_connection((host, port), timeout=1):
+                    break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"Server {host}:{port} did not become reachable")
+                time.sleep(0.1)
+
+
 def wait_until_trained(client, index_id, timeout_seconds):
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
@@ -134,7 +187,7 @@ def exact_reference(base, queries, k):
 
 
 def validate_args(args, base_count, query_count, groundtruth_width):
-    if args.num_servers < 1:
+    if args.num_servers is not None and args.num_servers < 1:
         raise ValueError("--num-servers must be positive")
     if args.k < 1:
         raise ValueError("--k must be positive")
@@ -170,6 +223,17 @@ def main():
         raise ValueError(f"Query count {len(queries)} != ground-truth count {len(groundtruth)}")
     validate_args(args, len(base), len(queries), groundtruth_width)
 
+    external = args.discovery_config is not None
+    if external:
+        endpoints = wait_for_discovery(args.discovery_config, args.timeout_seconds)
+        if args.num_servers is not None and args.num_servers != len(endpoints):
+            raise ValueError(
+                f"--num-servers={args.num_servers} does not match discovery count {len(endpoints)}"
+            )
+        num_servers = len(endpoints)
+    else:
+        num_servers = args.num_servers or 2
+
     full_base_count = len(base)
     base_count = args.max_base or full_base_count
     query_count = args.max_queries or len(queries)
@@ -184,45 +248,58 @@ def main():
     load_seconds = time.perf_counter() - load_start
 
     num_add_batches = math.ceil(base_count / args.add_batch_size)
-    if num_add_batches < args.num_servers:
+    if num_add_batches < num_servers:
         raise ValueError(
             "Each server must receive at least one batch; lower --num-servers or "
             "--add-batch-size"
         )
 
-    ports = reserve_free_ports(args.num_servers)
     servers = []
     threads = []
     client = None
 
-    with tempfile.TemporaryDirectory(prefix="distributed-faiss-sift1m-") as temp_dir:
-        storage_dir = Path(temp_dir) / "indexes"
-        discovery_path = Path(temp_dir) / "servers.txt"
-        discovery_path.write_text(
-            str(args.num_servers) + "\n" + "".join(f"localhost,{port}\n" for port in ports)
-        )
+    temp_context = (
+        nullcontext(None)
+        if external
+        else tempfile.TemporaryDirectory(prefix="distributed-faiss-sift1m-")
+    )
+    with temp_context as temp_dir:
+        if external:
+            discovery_path = args.discovery_config
+        else:
+            storage_dir = Path(temp_dir) / "indexes"
+            discovery_path = Path(temp_dir) / "servers.txt"
+            ports = reserve_free_ports(num_servers)
+            discovery_path.write_text(
+                str(num_servers) + "\n" + "".join(f"localhost,{port}\n" for port in ports)
+            )
 
         try:
-            for rank, port in enumerate(ports):
-                server = IndexServer(rank, index_storage_dir=str(storage_dir))
-                thread = threading.Thread(
-                    target=server.start_blocking,
-                    args=(port,),
-                    daemon=True,
-                )
-                thread.start()
-                servers.append(server)
-                threads.append(thread)
+            if external:
+                wait_for_external_servers(endpoints, args.timeout_seconds)
+            else:
+                for rank, port in enumerate(ports):
+                    server = IndexServer(rank, index_storage_dir=str(storage_dir))
+                    thread = threading.Thread(
+                        target=server.start_blocking,
+                        args=(port,),
+                        daemon=True,
+                    )
+                    thread.start()
+                    servers.append(server)
+                    threads.append(thread)
 
-            for server in servers:
-                if not server.ready.wait(timeout=args.timeout_seconds):
-                    raise TimeoutError("A shard server did not become ready")
+                for server in servers:
+                    if not server.ready.wait(timeout=args.timeout_seconds):
+                        raise TimeoutError("A shard server did not become ready")
 
             client = IndexClient(str(discovery_path))
             if args.omp_threads is not None:
                 client.set_omp_num_threads(args.omp_threads)
 
-            index_id = "sift1m_flat_l2"
+            index_id = args.index_id or (
+                f"sift1m_flat_l2_{uuid.uuid4().hex[:12]}" if external else "sift1m_flat_l2"
+            )
             config = IndexCfg(
                 index_builder_type="flat",
                 dim=dimension,
@@ -232,7 +309,11 @@ def main():
             )
 
             build_start = time.perf_counter()
-            client.create_index(index_id, config)
+            created = client.create_index(index_id, config)
+            if not all(created):
+                raise RuntimeError(
+                    f"Index {index_id!r} already exists on at least one server: {created}"
+                )
             # Make data placement reproducible instead of using IndexClient's random start rank.
             client.cur_server_ids[index_id] = 0
             for start in range(0, base_count, args.add_batch_size):
@@ -249,7 +330,7 @@ def main():
             wait_until_trained(client, index_id, args.timeout_seconds)
             build_seconds = time.perf_counter() - build_start
 
-            shard_sizes = [server.get_ntotal(index_id) for server in servers]
+            shard_sizes = [index.get_ntotal(index_id) for index in client.sub_indexes]
             indexed_vectors = client.get_ntotal(index_id)
 
             result_ids = []
@@ -279,7 +360,10 @@ def main():
                 "index": "flat",
                 "metric": "squared_l2",
                 "reference_source": reference_source,
-                "num_servers": args.num_servers,
+                "execution_mode": "external_servers" if external else "localhost_threads",
+                "discovery_config": str(discovery_path.resolve()) if external else None,
+                "index_id": index_id,
+                "num_servers": num_servers,
                 "num_vectors": base_count,
                 "num_queries": query_count,
                 "dimension": dimension,
@@ -301,6 +385,7 @@ def main():
                 "search_seconds": search_seconds,
                 "qps": query_count / search_seconds,
                 "peak_process_rss_mb": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024,
+                "rss_scope": "client_only" if external else "client_and_server_threads",
                 "passed": passed,
             }
             rendered = json.dumps(result, indent=2)

@@ -1,10 +1,12 @@
 from argparse import Namespace
+import os
 
 import numpy as np
 import pytest
 
-from scripts.benchmark_sift1m import mmap_vecs, recall_at_k, validate_args
+from scripts.benchmark_sift1m import mmap_vecs, read_discovery, recall_at_k, validate_args
 from scripts.run_sift1m_local_matrix import summarize
+from scripts.run_sift1m_external_matrix import read_vm_hwm_mb
 from distributed_faiss.server import IndexServer
 
 
@@ -93,3 +95,17 @@ def test_server_accepts_valid_omp_thread_count(tmp_path):
     assert server.omp_num_threads == 4
     with pytest.raises(ValueError, match="must be positive"):
         server.set_omp_num_threads(0)
+
+
+def test_read_discovery_validates_server_count(tmp_path):
+    discovery = tmp_path / "servers.txt"
+    discovery.write_text("2\nlocalhost,10001\nlocalhost,10002\n")
+    assert read_discovery(discovery) == [("localhost", 10001), ("localhost", 10002)]
+
+    discovery.write_text("2\nlocalhost,10001\n")
+    with pytest.raises(ValueError, match="declares 2 servers but lists 1"):
+        read_discovery(discovery)
+
+
+def test_read_vm_hwm_for_current_process():
+    assert read_vm_hwm_mb(os.getpid()) > 0

@@ -68,6 +68,44 @@ server cases, respectively. The reported RSS is the peak of the localhost
 process, which contains all server threads and the client. These results are
 for independent SIFT1M query search, not all-kNN graph construction.
 
+To connect the benchmark to independently launched server processes, provide
+the discovery file instead of relying on localhost server threads:
+
+```bash
+python scripts/benchmark_sift1m.py \
+    --dataset-dir /path/to/SIFT1M \
+    --discovery-config /path/to/servers.txt \
+    --omp-threads 4 \
+    --output results/sift1m_external.json
+```
+
+The discovery file starts with the number of servers, followed by one
+`hostname,port` line per server. The benchmark waits for all entries and
+reachable endpoints, infers the server count, uses a new index ID by default,
+and leaves external servers running after it exits. In this mode, the reported
+RSS covers only the client process, not remote servers. To validate the same
+mode with two short-lived independent processes on localhost, run
+`python scripts/smoke_external_sift1m.py --num-servers 2`.
+For manual or scheduler-managed process launches, use
+`python scripts/serve_index.py --rank 0 --port 12033 --storage-dir /path/to/indexes`
+for each rank, then write their host/port entries to the discovery file.
+
+For the full local independent-process matrix, run:
+
+```bash
+python scripts/run_sift1m_external_matrix.py \
+    --dataset-dir /path/to/SIFT1M \
+    --servers 1 2 4 \
+    --repeats 3 \
+    --total-omp-threads 8 \
+    --output-dir results/sift1m_external_matrix
+```
+
+This launches fresh server processes for every repetition, keeps raw JSON
+results, and writes medians to `summary.json`. It records Linux `VmHWM` for
+each server before stopping it. The sum of individual peak RSS values is not
+the simultaneous peak memory of the full system.
+
 ### Code formatting
 `black --line-length 100 .`
 
